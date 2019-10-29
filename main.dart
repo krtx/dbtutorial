@@ -58,22 +58,60 @@ class Row {
 
   String toString() {
     var decoder = Utf8Decoder();
-    return "(${this.id},${decoder.convert(this.username)},${decoder.convert(this.email)})";
+    return "(${this.id}, ${decoder.convert(this.username)}, ${decoder.convert(this.email)})";
+  }
+}
+
+class Pager {
+  RandomAccessFile file;
+  List<Uint8List> pages;
+
+  static const MaxPages = 100;
+  static const PageSize = 4096;
+  static const RowsPerPage = PageSize ~/ Row.Size;
+
+  Pager.open(String filename) {
+    this.file = File(filename).openSync(mode: FileMode.append);
+    this.pages = List(MaxPages);
+  }
+
+  Uint8List fetch(int pageIndex) {
+    assert(pageIndex < MaxPages);
+
+    if (this.pages[pageIndex] == null) {
+      Uint8List page;
+      var numPages = (this.file.lengthSync() + PageSize - 1) ~/ PageSize;
+      if (pageIndex < numPages) {
+        this.file.setPositionSync(pageIndex * PageSize);
+        page = this.file.readSync(PageSize);
+      } else {
+        page = Uint8List(PageSize);
+      }
+      this.pages[pageIndex] = page;
+    }
+
+    return this.pages[pageIndex];
+  }
+
+  void flush(int pageIndex, {int size = PageSize}) {
+    if (this.pages[pageIndex] == null) {
+      return;
+    }
+
+    this.file.setPositionSync(pageIndex * PageSize);
+    this.file.writeFromSync(this.pages[pageIndex], 0, size);
   }
 }
 
 class Table {
   int numRows;
-  List<Uint8List> pages;
+  Pager pager;
 
-  static const PageSize = 4096;
-  static const MaxPages = 100;
-  static const RowsPerPage = PageSize / Row.Size;
-  static const TableMaxRows = RowsPerPage * MaxPages;
+  static const TableMaxRows = Pager.RowsPerPage * Pager.MaxPages;
 
-  Table() {
-    numRows = 0;
-    pages = new List(MaxPages);
+  Table.open(String filename) {
+    this.pager = Pager.open(filename);
+    this.numRows = this.pager.file.lengthSync() ~/ Row.Size;
   }
 
   void add(Row row) {
@@ -81,15 +119,10 @@ class Table {
       throw 'the table is full';
     }
 
-    int pageIndex = this.numRows ~/ RowsPerPage;
-    if (this.pages[pageIndex] == null) {
-      this.pages[pageIndex] = Uint8List(PageSize);
-    }
-
-    int rowOffset = this.numRows.remainder(RowsPerPage).toInt();
+    int pageIndex = this.numRows ~/ Pager.RowsPerPage;
+    int rowOffset = this.numRows.remainder(Pager.RowsPerPage).toInt();
     int byteOffset = rowOffset * Row.Size;
-
-    row.serialize(this.pages[pageIndex], byteOffset);
+    row.serialize(this.pager.fetch(pageIndex), byteOffset);
 
     this.numRows += 1;
   }
@@ -97,17 +130,27 @@ class Table {
   List<Row> select() {
     List<Row> rows = [];
 
-    // deserialize
     for (int i = 0; i < this.numRows; i++) {
-      int pageIndex = i ~/ RowsPerPage;
-      int rowOffset = i.remainder(RowsPerPage).toInt();
+      int pageIndex = i ~/ Pager.RowsPerPage;
+      int rowOffset = i.remainder(Pager.RowsPerPage).toInt();
       int byteOffset = rowOffset * Row.Size;
-
-      Row row = Row.deserialize(this.pages[pageIndex], byteOffset);
+      Row row = Row.deserialize(this.pager.fetch(pageIndex), byteOffset);
       rows.add(row);
     }
 
     return rows;
+  }
+
+  void close() {
+    var numFullPages = this.numRows ~/ Pager.RowsPerPage;
+    for (var i = 0; i < numFullPages; i++) {
+      this.pager.flush(i);
+    }
+
+    var numAdditionalRows = this.numRows.remainder(Pager.RowsPerPage);
+    if (numAdditionalRows > 0) {
+      this.pager.flush(numFullPages, size: numAdditionalRows * Row.Size);
+    }
   }
 }
 
@@ -148,16 +191,26 @@ class Statement {
     switch (type) {
       case StatementType.insert:
         table.add(this.rowToInsert);
+        stdout.writeln('Executed.');
         break;
       case StatementType.select:
-        print(table.select());
+        var rows = table.select();
+        for (var row in rows) {
+          print(row);
+        }
         break;
     }
   }
 }
 
-void main() {
-  Table table = Table();
+void main(List<String> arguments) {
+  if (arguments.length != 1) {
+    stderr.writeln('Must supply a database filename.');
+    exitCode = 1;
+    return;
+  }
+
+  Table table = Table.open(arguments[0]);
 
   // repl
   while (true) {
@@ -174,6 +227,7 @@ void main() {
     // meta commands
     if (line.startsWith(".")) {
       if (line == '.exit') {
+        table.close();
         exitCode = 0;
         break;
       } else {
