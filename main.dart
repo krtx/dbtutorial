@@ -1,6 +1,35 @@
 import 'dart:typed_data';
 import 'dart:io';
 import 'dart:convert';
+import 'package:tuple/tuple.dart';
+
+enum NodeType { internal, leaf }
+
+class LeafNode {
+  static const NodeTypeSize = 1;
+  static const IsRootSize = 1;
+  static const ParentPointerSize = 4;
+  static const CommonNodeHeaderSize = NodeTypeSize + IsRootSize + ParentPointerSize;
+
+  static const LeafNodeNumCellsSize = 4;
+  static const LeafNodeHeaderSize = CommonNodeHeaderSize + LeafNodeNumCellsSize;
+
+  static const LeafNodeKeySize = 4;
+  static const LeafNodeValueSize = Row.Size;
+  static const LeafNodeCellSize = LeafNodeKeySize + LeafNodeValueSize;
+  static const LeafNodeSpaceForCells = Pager.PageSize - LeafNodeHeaderSize;
+  static const LeafNodeMaxCells = LeafNodeSpaceForCells ~/ LeafNodeCellSize;
+
+  int nodeType;
+  bool isRoot;
+  int parentPointer;
+  int numCells;
+  List<Tuple2<int, Row>> cells;
+
+  LeafNode.init() {}
+
+  Uint8List serialized() {}
+}
 
 /// a row of the table
 class Row {
@@ -64,7 +93,7 @@ class Row {
 
 class Pager {
   RandomAccessFile file;
-  List<Uint8List> pages;
+  List<Uint8List> _caches;
 
   static const MaxPages = 100;
   static const PageSize = 4096;
@@ -72,34 +101,34 @@ class Pager {
 
   Pager.open(String filename) {
     this.file = File(filename).openSync(mode: FileMode.append);
-    this.pages = List(MaxPages);
+    this._caches = List(MaxPages);
   }
 
   Uint8List fetch(int pageIndex) {
     assert(pageIndex < MaxPages);
 
-    if (this.pages[pageIndex] == null) {
-      Uint8List page;
-      var numPages = (this.file.lengthSync() + PageSize - 1) ~/ PageSize;
-      if (pageIndex < numPages) {
-        this.file.setPositionSync(pageIndex * PageSize);
-        page = this.file.readSync(PageSize);
-      } else {
-        page = Uint8List(PageSize);
-      }
-      this.pages[pageIndex] = page;
+    if (this._caches[pageIndex] != null) {
+      return this._caches[pageIndex];
     }
 
-    return this.pages[pageIndex];
+    var numPages = (this.file.lengthSync() + PageSize - 1) ~/ PageSize;
+    if (pageIndex < numPages) {
+      this.file.setPositionSync(pageIndex * PageSize);
+      this._caches[pageIndex] = this.file.readSync(PageSize);
+    } else {
+      this._caches[pageIndex] = Uint8List(PageSize);
+    }
+
+    return this._caches[pageIndex];
   }
 
   void flush(int pageIndex, {int size = PageSize}) {
-    if (this.pages[pageIndex] == null) {
+    if (this._caches[pageIndex] == null) {
       return;
     }
 
     this.file.setPositionSync(pageIndex * PageSize);
-    this.file.writeFromSync(this.pages[pageIndex], 0, size);
+    this.file.writeFromSync(this._caches[pageIndex], 0, size);
   }
 }
 
