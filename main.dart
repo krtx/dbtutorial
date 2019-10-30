@@ -20,39 +20,39 @@ class Row {
     this.email = encoder.convert(email);
   }
 
-  /// deserialize the data from the buffer starting from offset
-  Row.deserialize(Uint8List buffer, int offset) {
-    assert(buffer.length >= offset + Size);
+  /// deserialize the data from the buffer
+  Row.deserialize(Uint8List buffer) {
+    assert(buffer.length >= Size);
 
     // id (big endian)
-    this.id = (buffer[offset] << 24) | (buffer[offset + 1] << 16) | (buffer[offset + 2] << 8) | buffer[offset + 3];
+    this.id = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
 
     // username
-    this.username = Uint8List.fromList(buffer.skip(offset + IdSize).take(UsernameSize).toList());
+    this.username = Uint8List.fromList(buffer.skip(IdSize).take(UsernameSize).toList());
 
     // email
-    this.email = Uint8List.fromList(buffer.skip(offset + IdSize + UsernameSize).take(EmailSize).toList());
+    this.email = Uint8List.fromList(buffer.skip(IdSize + UsernameSize).take(EmailSize).toList());
   }
 
-  /// serialize the data into the buffer starting from offset
+  /// serialize the data into the buffer
   /// the length of serialized list is fixed (RowSize = IdSize + UsernameSize + EmailSize)
-  void serialize(Uint8List buffer, int offset) {
-    assert(buffer.length >= offset + Size);
+  void serialize(Uint8List buffer) {
+    assert(buffer.length >= Size);
 
     // id (big endian)
-    buffer[offset] = (this.id >> 24) & 255;
-    buffer[offset + 1] = (this.id >> 16) & 255;
-    buffer[offset + 2] = (this.id >> 8) & 255;
-    buffer[offset + 3] = this.id & 255;
+    buffer[0] = (this.id >> 24) & 255;
+    buffer[1] = (this.id >> 16) & 255;
+    buffer[2] = (this.id >> 8) & 255;
+    buffer[3] = this.id & 255;
 
     // username
     for (var i = 0; i < this.username.length; i++) {
-      buffer[offset + IdSize + i] = this.username[i];
+      buffer[IdSize + i] = this.username[i];
     }
 
     // email
     for (var i = 0; i < this.email.length; i++) {
-      buffer[offset + IdSize + UsernameSize + i] = this.email[i];
+      buffer[IdSize + UsernameSize + i] = this.email[i];
     }
   }
 
@@ -103,6 +103,49 @@ class Pager {
   }
 }
 
+/// Cursor object represents a location in the table
+class Cursor {
+  Table table;
+
+  /// current row index
+  int rowIndex;
+
+  /// Indicates a position one past the last element
+  bool endOfTable;
+
+  /// Cursor object points to the start of the table, where a row may exist
+  Cursor.tableStart(this.table) {
+    this.rowIndex = 0;
+    this.endOfTable = this.table.numRows == 0;
+  }
+
+  /// Cursor object points to the end of the table (not inclusive)
+  /// This cursor always points to the place where new rows should be added
+  Cursor.tableEnd(this.table) {
+    this.rowIndex = this.table.numRows;
+    this.endOfTable = true;
+  }
+
+  /// increments the pointer position by 1, even if the pointer is in the end of the table
+  advance() {
+    this.rowIndex += 1;
+    if (this.rowIndex >= this.table.numRows) {
+      this.endOfTable = true;
+    }
+  }
+
+  /// the pointer value
+  Uint8List value() {
+    int pageIndex = this.rowIndex ~/ Pager.RowsPerPage;
+    int rowOffset = this.rowIndex.remainder(Pager.RowsPerPage).toInt();
+    int byteOffset = rowOffset * Row.Size;
+
+    // this Uint8List is a view of the underlying page and changes in this list
+    // will be visible in the original list and vice versa
+    return Uint8List.view(this.table.pager.fetch(pageIndex).buffer, byteOffset);
+  }
+}
+
 class Table {
   int numRows;
   Pager pager;
@@ -119,23 +162,18 @@ class Table {
       throw 'the table is full';
     }
 
-    int pageIndex = this.numRows ~/ Pager.RowsPerPage;
-    int rowOffset = this.numRows.remainder(Pager.RowsPerPage).toInt();
-    int byteOffset = rowOffset * Row.Size;
-    row.serialize(this.pager.fetch(pageIndex), byteOffset);
+    // serialize the row into the end of the table
+    row.serialize(Cursor.tableEnd(this).value());
 
     this.numRows += 1;
   }
 
   List<Row> select() {
+    Cursor cursor = Cursor.tableStart(this);
     List<Row> rows = [];
-
-    for (int i = 0; i < this.numRows; i++) {
-      int pageIndex = i ~/ Pager.RowsPerPage;
-      int rowOffset = i.remainder(Pager.RowsPerPage).toInt();
-      int byteOffset = rowOffset * Row.Size;
-      Row row = Row.deserialize(this.pager.fetch(pageIndex), byteOffset);
-      rows.add(row);
+    while (!(cursor.endOfTable)) {
+      rows.add(Row.deserialize(cursor.value()));
+      cursor.advance();
     }
 
     return rows;
